@@ -1,18 +1,16 @@
-
 import io
 import re
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
-# ==================================================
-# 1. 页面设置
-# ==================================================
+# =====================================================
+# 1. 页面配置
+# =====================================================
 
 st.set_page_config(
-    page_title="经营利润与成本分析系统",
+    page_title="经营利润与成本费用分析",
     page_icon="📊",
     layout="wide"
 )
@@ -20,14 +18,14 @@ st.set_page_config(
 st.markdown("""
 <style>
 .block-container {
-    padding-top: 1.5rem;
+    padding-top: 1.4rem;
     padding-bottom: 2rem;
 }
 [data-testid="stMetric"] {
-    background: #f5f7fa;
+    background-color: #f5f7fa;
     border: 1px solid #e5e7eb;
-    padding: 15px;
     border-radius: 10px;
+    padding: 15px;
 }
 [data-testid="stMetricLabel"] {
     font-weight: 600;
@@ -36,12 +34,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("经营利润与成本费用分析 Dashboard")
-st.caption("销售收入 · 成本结构 · 核心费用率 · 运营绩效 · 利润优化")
+st.caption(
+    "销售分析 | 8项核心费率 | 成本结构 | "
+    "月度趋势 | 运营绩效 | 利润优化"
+)
 
-
-# ==================================================
-# 2. 字段配置
-# ==================================================
+# =====================================================
+# 2. 字段定义
+# =====================================================
 
 DIMENSIONS = [
     "月份",
@@ -50,7 +50,10 @@ DIMENSIONS = [
     "站点"
 ]
 
+# 八项重点监控指标
 CORE_EXPENSES = [
+    "头程净额",
+    "退款收入",
     "站内推广费",
     "平台佣金",
     "站外推广费",
@@ -59,16 +62,22 @@ CORE_EXPENSES = [
     "其他费用"
 ]
 
-OTHER_EXPENSES = [
+# 实际费用项目
+# 注意：退款收入不在这里重复计算
+EXPENSES = [
     "头程净额",
     "站内仓储费",
     "税费",
     "平台服务费",
     "平台运费",
+    "站内推广费",
+    "平台佣金",
+    "站外推广费",
+    "自发货运费",
+    "售后费用",
+    "其他费用",
     "站外仓储费"
 ]
-
-ALL_EXPENSES = OTHER_EXPENSES + CORE_EXPENSES
 
 AMOUNT_COLUMNS = [
     "销售收入",
@@ -93,32 +102,42 @@ AMOUNT_COLUMNS = [
     "实际回款-提成计算"
 ]
 
-RATE_COLUMNS = [
-    "成本率",
-    "费用占比",
-    "毛利率",
-    "成本回报率"
-]
+RATE_NAMES = {
+    "头程净额": "头程净额费率",
+    "退款收入": "退款费率",
+    "站内推广费": "站内推广费率",
+    "平台佣金": "平台佣金率",
+    "站外推广费": "站外推广费率",
+    "自发货运费": "自发货运费率",
+    "售后费用": "售后费用率",
+    "其他费用": "其他费用率"
+}
 
-REQUIRED_COLUMNS = (
+RATE_COLUMNS = list(RATE_NAMES.values())
+
+REQUIRED = (
     DIMENSIONS
     + ["销售收入", "退款收入", "成本净额"]
-    + ALL_EXPENSES
+    + EXPENSES
 )
 
-# ==================================================
+# =====================================================
 # 3. 通用函数
-# ==================================================
+# =====================================================
 
 def clean_number(series):
-    """金额清洗，支持逗号、货币符号和括号负数"""
     s = series.astype(str).str.strip()
 
     s = s.str.replace(",", "", regex=False)
     s = s.str.replace("$", "", regex=False)
     s = s.str.replace("¥", "", regex=False)
     s = s.str.replace("￥", "", regex=False)
-    s = s.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+
+    s = s.str.replace(
+        r"^\((.*)\)$",
+        r"-\1",
+        regex=True
+    )
 
     s = s.replace({
         "": "0",
@@ -128,12 +147,12 @@ def clean_number(series):
     })
 
     return pd.to_numeric(
-        s, errors="coerce"
+        s,
+        errors="coerce"
     ).fillna(0)
 
 
 def safe_divide(a, b):
-    """安全计算比率"""
     if abs(b) < 1e-10:
         return np.nan
     return a / b
@@ -150,7 +169,6 @@ def pct(v):
 
 
 def normalize_month(v):
-    """月份统一处理"""
     if pd.isna(v):
         return "未填写"
 
@@ -162,11 +180,13 @@ def normalize_month(v):
     if re.fullmatch(r"\d{6}", s):
         year = int(s[:4])
         month = int(s[4:])
+
         if 1 <= month <= 12:
             return f"{year}-{month:02d}"
 
     if re.fullmatch(r"\d{1,2}", s):
         month = int(s)
+
         if 1 <= month <= 12:
             return f"{month:02d}月"
 
@@ -175,114 +195,171 @@ def normalize_month(v):
             s.replace("年", "-").replace("月", ""),
             errors="coerce"
         )
+
         if pd.notna(parsed):
             return parsed.strftime("%Y-%m")
+
     except Exception:
         pass
 
     return s
 
 
-def aggregate_rates(data, group_cols):
-    """按维度汇总金额，再重新计算费率"""
-    cols = [
-        "分析收入",
-        "成本净额",
-        "分析费用",
-        "分析毛利"
-    ] + ALL_EXPENSES
-
-    result = (
-        data.groupby(
-            group_cols,
-            as_index=False
-        )[cols]
-        .sum()
-    )
-
-    denominator = result["分析收入"].replace(0, np.nan)
-
-    result["成本率"] = result["成本净额"] / denominator
-    result["费用率"] = result["分析费用"] / denominator
-    result["毛利率"] = result["分析毛利"] / denominator
-
-    for item in ALL_EXPENSES:
-        result[item + "率"] = result[item] / denominator
-
-    result["六项综合费用"] = result[CORE_EXPENSES].sum(axis=1)
-    result["六项综合费用率"] = (
-        result["六项综合费用"] / denominator
-    )
-
-    return result
-
-
-def show_table(data, percent_cols=None, money_cols=None):
+def show_table(
+    dataframe,
+    percent_cols=None,
+    money_cols=None
+):
     percent_cols = percent_cols or []
     money_cols = money_cols or []
 
     formats = {}
 
-    for c in percent_cols:
-        if c in data.columns:
-            formats[c] = "{:.2%}"
+    for col in percent_cols:
+        if col in dataframe.columns:
+            formats[col] = "{:.2%}"
 
-    for c in money_cols:
-        if c in data.columns:
-            formats[c] = "{:,.2f}"
+    for col in money_cols:
+        if col in dataframe.columns:
+            formats[col] = "{:,.2f}"
 
     st.dataframe(
-        data.style.format(formats, na_rep="—"),
+        dataframe.style.format(
+            formats,
+            na_rep="—"
+        ),
         use_container_width=True,
         hide_index=True
     )
 
 
-# ==================================================
-# 4. 上传数据
-# ==================================================
+def aggregate_data(data, dimensions):
+    """先汇总金额，再计算费率"""
+
+    columns = [
+        "销售收入",
+        "退款金额",
+        "分析收入",
+        "成本净额",
+        "分析费用",
+        "分析毛利"
+    ] + EXPENSES
+
+    # 去除重复列
+    columns = list(dict.fromkeys(columns))
+
+    result = (
+        data.groupby(
+            dimensions,
+            as_index=False
+        )[columns]
+        .sum()
+    )
+
+    net = result["分析收入"].replace(
+        0, np.nan
+    )
+
+    gross = result["销售收入"].replace(
+        0, np.nan
+    )
+
+    result["成本率"] = (
+        result["成本净额"] / net
+    )
+
+    result["费用率"] = (
+        result["分析费用"] / net
+    )
+
+    result["毛利率"] = (
+        result["分析毛利"] / net
+    )
+
+    result["退款费率"] = (
+        result["退款金额"] / gross
+    )
+
+    for item in CORE_EXPENSES:
+        if item != "退款收入":
+            rate_name = RATE_NAMES[item]
+
+            result[rate_name] = (
+                result[item] / net
+            )
+
+    # 七项实际费用，退款不重复计算
+    actual_core = [
+        x for x in CORE_EXPENSES
+        if x != "退款收入"
+    ]
+
+    result["七项核心费用合计"] = (
+        result[actual_core].sum(axis=1)
+    )
+
+    result["七项核心费用率"] = (
+        result["七项核心费用合计"] / net
+    )
+
+    return result
+
+
+# =====================================================
+# 4. 数据上传
+# =====================================================
 
 st.sidebar.header("数据导入")
 
 uploaded_file = st.sidebar.file_uploader(
-    "上传 Excel / CSV",
+    "上传经营数据",
     type=["xlsx", "csv"]
 )
 
 if uploaded_file is None:
-    st.info("请在左侧上传经营数据 Excel 或 CSV 文件。")
+
+    st.info("请在左侧上传 Excel 或 CSV 经营数据。")
 
     st.markdown("""
-    ### 数据要求
+    ### 支持的分析内容
 
-    Excel 第一行使用以下表头：
+    - 8项核心费用率
+    - 月度费用率趋势
+    - 部门、运营人员、站点对比
+    - 销售净毛利及毛利率
+    - 成本费用结构
+    - 毛利率变化归因
+    - 利润优化与降本模拟
+    - Excel 分析结果导出
 
-    月份、部门、运营人员、站点、销售收入、退款收入、
-    收入合计、成本净额、成本率、头程净额、
-    站内仓储费、税费、平台服务费、平台运费、
-    站内推广费、平台佣金、站外推广费、
-    自发货运费、售后费用、其他费用、
-    站外仓储费、费用合计、费用占比、
-    销售净毛利、毛利率、平台回款、
-    实际回款-提成计算、成本回报率。
-
-    支持多月份、多部门、多运营人员和多站点。
+    请确保 Excel 第一行为字段名称。
     """)
 
     st.stop()
 
 try:
+
     if uploaded_file.name.lower().endswith(".csv"):
+
         try:
-            raw = pd.read_csv(uploaded_file, encoding="utf-8-sig")
+            raw = pd.read_csv(
+                uploaded_file,
+                encoding="utf-8-sig"
+            )
+
         except UnicodeDecodeError:
             uploaded_file.seek(0)
-            raw = pd.read_csv(uploaded_file, encoding="gb18030")
+
+            raw = pd.read_csv(
+                uploaded_file,
+                encoding="gb18030"
+            )
+
     else:
         raw = pd.read_excel(uploaded_file)
 
 except Exception as e:
-    st.error(f"读取文件失败：{e}")
+    st.error(f"文件读取失败：{e}")
     st.stop()
 
 raw.columns = [
@@ -291,26 +368,27 @@ raw.columns = [
 ]
 
 if raw.columns.duplicated().any():
-    st.error("文件存在重复表头，请先检查。")
+    st.error("存在重复表头，请检查 Excel。")
     st.stop()
 
 missing = [
-    c for c in REQUIRED_COLUMNS
+    c for c in REQUIRED
     if c not in raw.columns
 ]
 
 if missing:
-    st.error("缺少字段：" + "、".join(missing))
+    st.error(
+        "缺少必要字段：" + "、".join(missing)
+    )
     st.stop()
 
 if raw.empty:
-    st.warning("文件没有数据。")
+    st.warning("上传文件没有数据。")
     st.stop()
 
-
-# ==================================================
+# =====================================================
 # 5. 数据清洗
-# ==================================================
+# =====================================================
 
 data = raw.copy()
 
@@ -327,59 +405,75 @@ for col in DIMENSIONS[1:]:
         .replace("", "未填写")
     )
 
-data["月份"] = data["月份"].map(normalize_month)
+data["月份"] = data["月份"].map(
+    normalize_month
+)
 
-# ==================================================
-# 6. 财务计算口径
-# ==================================================
+# =====================================================
+# 6. 财务计算设置
+# =====================================================
 
 st.sidebar.header("财务计算设置")
 
 refund_mode = st.sidebar.radio(
     "退款收入记录方式",
     [
-        "退款为负数",
-        "退款为正数"
-    ],
-    help="根据你的原始财务报表选择"
-)
-
-expense_mode = st.sidebar.radio(
-    "费用合计口径",
-    [
-        "自动计算全部12项费用",
-        "使用原表费用合计"
+        "负数记录退款",
+        "正数记录退款"
     ]
 )
 
 revenue_mode = st.sidebar.radio(
-    "收入合计口径",
+    "收入合计计算方式",
     [
         "使用原表收入合计",
-        "自动计算销售减退款"
+        "销售收入减退款金额"
+    ]
+)
+
+expense_mode = st.sidebar.radio(
+    "费用合计计算方式",
+    [
+        "自动汇总12项费用",
+        "使用原表费用合计"
     ]
 )
 
 target_margin = st.sidebar.slider(
     "目标毛利率 (%)",
-    0.0, 50.0, 20.0, 0.5
+    0.0,
+    50.0,
+    20.0,
+    0.5
 ) / 100
 
 alert_threshold = st.sidebar.slider(
-    "核心费用率预警线 (%)",
-    0.0, 30.0, 10.0, 0.5
+    "核心费用率预警 (%)",
+    0.0,
+    30.0,
+    10.0,
+    0.5
 ) / 100
 
-if refund_mode == "退款为负数":
-    data["计算收入"] = (
-        data["销售收入"] + data["退款收入"]
-    )
+# 退款金额统一转成正数
+if refund_mode == "负数记录退款":
+    data["退款金额"] = -data["退款收入"]
 else:
-    data["计算收入"] = (
-        data["销售收入"] - data["退款收入"]
-    )
+    data["退款金额"] = data["退款收入"]
 
-data["计算费用"] = data[ALL_EXPENSES].sum(axis=1)
+# 保留原始符号异常供检查
+refund_sign_errors = int(
+    (data["退款金额"] < 0).sum()
+)
+
+data["计算收入"] = (
+    data["销售收入"]
+    - data["退款金额"]
+)
+
+data["计算费用"] = (
+    data[EXPENSES].sum(axis=1)
+)
 
 if (
     revenue_mode == "使用原表收入合计"
@@ -403,18 +497,21 @@ data["分析毛利"] = (
     - data["分析费用"]
 )
 
-
-# ==================================================
-# 7. 全局筛选
-# ==================================================
+# =====================================================
+# 7. 筛选
+# =====================================================
 
 st.sidebar.header("筛选条件")
 
 filtered = data.copy()
 
 for col in DIMENSIONS:
+
     options = sorted(
-        filtered[col].astype(str).unique().tolist()
+        filtered[col]
+        .astype(str)
+        .unique()
+        .tolist()
     )
 
     selected = st.sidebar.multiselect(
@@ -431,43 +528,81 @@ if filtered.empty:
     st.warning("当前筛选条件下没有数据。")
     st.stop()
 
+# =====================================================
+# 8. 核心经营指标
+# =====================================================
 
-# ==================================================
-# 8. 汇总指标
-# ==================================================
-
-revenue = filtered["分析收入"].sum()
 sales = filtered["销售收入"].sum()
+refund = filtered["退款金额"].sum()
+revenue = filtered["分析收入"].sum()
+
 cost = filtered["成本净额"].sum()
 expense = filtered["分析费用"].sum()
 profit = filtered["分析毛利"].sum()
 
-margin = safe_divide(profit, revenue)
 cost_rate = safe_divide(cost, revenue)
 expense_rate = safe_divide(expense, revenue)
+margin = safe_divide(profit, revenue)
 
-core_total = filtered[CORE_EXPENSES].sum().sum()
-core_rate = safe_divide(core_total, revenue)
+refund_rate = safe_divide(refund, sales)
 
+core_actual = [
+    c for c in CORE_EXPENSES
+    if c != "退款收入"
+]
 
-# ==================================================
+core_total = filtered[core_actual].sum().sum()
+
+core_rate = safe_divide(
+    core_total,
+    revenue
+)
+
+# 八项费率数据
+core_rows = []
+
+for item in CORE_EXPENSES:
+
+    if item == "退款收入":
+        amount = refund
+        rate = refund_rate
+        basis = "销售收入"
+
+    else:
+        amount = filtered[item].sum()
+        rate = safe_divide(
+            amount,
+            revenue
+        )
+        basis = "收入合计"
+
+    core_rows.append({
+        "费用项目": item,
+        "指标名称": RATE_NAMES[item],
+        "费用金额": amount,
+        "费率": rate,
+        "分母口径": basis
+    })
+
+core_df = pd.DataFrame(core_rows)
+
+# =====================================================
 # 9. 页面导航
-# ==================================================
+# =====================================================
 
 tabs = st.tabs([
     "经营总览",
-    "六项核心费用率",
-    "全部成本结构",
+    "8项核心费率",
     "月度趋势",
+    "成本费用结构",
     "运营绩效",
     "利润优化",
     "数据核对与导出"
 ])
 
-
-# ==================================================
+# =====================================================
 # TAB 1 经营总览
-# ==================================================
+# =====================================================
 
 with tabs[0]:
 
@@ -476,23 +611,20 @@ with tabs[0]:
     c1, c2, c3, c4 = st.columns(4)
 
     c1.metric("销售收入", money(sales))
-    c2.metric("收入合计", money(revenue))
-    c3.metric("销售净毛利", money(profit))
-    c4.metric("毛利率", pct(margin))
+    c2.metric("退款金额", money(refund))
+    c3.metric("收入合计", money(revenue))
+    c4.metric("销售净毛利", money(profit))
 
     c1, c2, c3, c4 = st.columns(4)
 
-    c1.metric("成本率", pct(cost_rate))
-    c2.metric("总费用率", pct(expense_rate))
-    c3.metric("六项综合费用率", pct(core_rate))
-    c4.metric(
-        "成本回报率",
-        pct(safe_divide(profit, cost + expense))
-    )
+    c1.metric("毛利率", pct(margin))
+    c2.metric("成本率", pct(cost_rate))
+    c3.metric("费用率", pct(expense_rate))
+    c4.metric("退款费率", pct(refund_rate))
 
     st.divider()
 
-    st.subheader("收入成本利润结构")
+    st.subheader("经营结构")
 
     overview = pd.DataFrame({
         "项目": [
@@ -524,83 +656,106 @@ with tabs[0]:
 
     fig.update_layout(showlegend=False)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("利润目标完成情况")
+    st.subheader("利润目标")
 
-    if pd.notna(margin):
-        gap = margin - target_margin
+    target_profit = revenue * target_margin
+    gap = target_profit - profit
 
-        st.metric(
-            "当前毛利率与目标差距",
-            f"{gap * 100:+.2f} 个百分点"
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "目标毛利率",
+        pct(target_margin)
+    )
+
+    c2.metric(
+        "实际毛利率",
+        pct(margin)
+    )
+
+    c3.metric(
+        "目标利润缺口",
+        money(max(gap, 0))
+    )
+
+    if gap > 0:
+        st.warning(
+            f"距离目标毛利率还需增加利润 "
+            f"{money(gap)}"
         )
-
-        if gap < 0:
-            st.error(
-                f"当前毛利率低于目标，"
-                f"需要改善 {abs(gap)*100:.2f} 个百分点。"
-            )
-        else:
-            st.success("当前毛利率达到目标。")
+    else:
+        st.success("当前已达到目标毛利率。")
 
 
-# ==================================================
-# TAB 2 六项核心费用率
-# ==================================================
+# =====================================================
+# TAB 2 八项核心费率
+# =====================================================
 
 with tabs[1]:
 
-    st.header("六项核心费用率分析")
+    st.header("8项核心费用率分析")
 
     st.caption(
-        "费用率 = 费用金额 ÷ 收入合计。"
-        "所有比率均使用筛选后的汇总金额计算。"
+        "退款费率以销售收入为分母；"
+        "其余7项费用率以收入合计为分母。"
     )
 
-    core_amounts = filtered[CORE_EXPENSES].sum()
+    # 八个指标卡片
+    st.subheader("核心费率 KPI")
 
-    core_df = pd.DataFrame({
-        "费用项目": CORE_EXPENSES,
-        "费用金额": [
-            core_amounts[c] for c in CORE_EXPENSES
-        ]
-    })
-
-    core_df["费用率"] = core_df["费用金额"].apply(
-        lambda x: safe_divide(x, revenue)
-    )
-
-    # 1. 六项费用率卡片
-    st.subheader("核心费用率 KPI")
-
-    cols = st.columns(3)
+    cols = st.columns(4)
 
     for i, row in core_df.iterrows():
-        with cols[i % 3]:
+
+        with cols[i % 4]:
             st.metric(
-                row["费用项目"] + "率",
-                pct(row["费用率"]),
-                help=f"费用金额：{money(row['费用金额'])}"
+                row["指标名称"],
+                pct(row["费率"]),
+                help=(
+                    f"金额：{money(row['费用金额'])}\n"
+                    f"分母：{row['分母口径']}"
+                )
             )
-
-    c1, c2 = st.columns(2)
-
-    c1.metric("六项费用合计", money(core_total))
-    c2.metric("六项综合费用率", pct(core_rate))
 
     st.divider()
 
-    # 2. 六项费用率柱状图
-    st.subheader("各项费用率对比")
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "七项实际费用合计",
+        money(core_total)
+    )
+
+    c2.metric(
+        "七项实际费用率",
+        pct(core_rate)
+    )
+
+    c3.metric(
+        "退款费率",
+        pct(refund_rate)
+    )
+
+    st.info(
+        "退款已在净收入中扣除，因此不再加入费用合计，"
+        "避免重复扣减。"
+    )
+
+    # 八项费率柱状图
+    st.subheader("八项费率横向对比")
 
     fig = px.bar(
         core_df,
-        x="费用项目",
-        y="费用率",
-        color="费用项目",
-        text="费用率",
-        title="六项费用占收入比例"
+        x="指标名称",
+        y="费率",
+        color="指标名称",
+        text="费率",
+        title="核心费用率对比"
     )
 
     fig.update_traces(
@@ -609,88 +764,79 @@ with tabs[1]:
     )
 
     fig.update_layout(
-        yaxis_tickformat=".1%",
-        showlegend=False
+        showlegend=False,
+        yaxis_tickformat=".1%"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    # 3. 六项费用构成
-    st.subheader("六项费用内部构成")
+    st.subheader("八项费率明细")
 
-    positive_core = core_df[core_df["费用金额"] > 0]
+    show_table(
+        core_df,
+        percent_cols=["费率"],
+        money_cols=["费用金额"]
+    )
 
-    if not positive_core.empty:
-        fig = px.pie(
-            positive_core,
-            names="费用项目",
-            values="费用金额",
-            hole=0.55,
-            title="六项费用金额构成"
-        )
+    # 月度费率
+    st.subheader("月度八项费率趋势")
 
-        st.plotly_chart(fig, use_container_width=True)
-
-    # 4. 月度费用率趋势
-    st.subheader("月度六项费用率趋势")
-
-    monthly_core = aggregate_rates(
+    monthly_core = aggregate_data(
         filtered,
         ["月份"]
     ).sort_values("月份")
 
-    rate_cols = [
-        c + "率" for c in CORE_EXPENSES
-    ]
-
     fig = px.line(
         monthly_core,
         x="月份",
-        y=rate_cols + ["六项综合费用率"],
+        y=RATE_COLUMNS,
         markers=True,
-        title="月度核心费用率变化"
+        title="月度核心费率变化趋势"
     )
 
     fig.update_layout(
         yaxis_tickformat=".1%",
-        legend_title_text="费用类型"
+        legend_title_text="费率指标"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("月度费用率明细")
-
-    monthly_display = monthly_core[
-        ["月份", "分析收入"]
-        + rate_cols
-        + ["六项综合费用率"]
-    ]
+    st.subheader("月度八项费率明细")
 
     show_table(
-        monthly_display,
-        percent_cols=rate_cols + ["六项综合费用率"],
-        money_cols=["分析收入"]
+        monthly_core[
+            ["月份", "销售收入", "分析收入"]
+            + RATE_COLUMNS
+        ],
+        percent_cols=RATE_COLUMNS,
+        money_cols=["销售收入", "分析收入"]
     )
 
-    # 5. 费用率预警
+    # 预警
     st.subheader("费用率预警")
 
     alerts = core_df[
-        core_df["费用率"] > alert_threshold
+        core_df["费率"] > alert_threshold
     ]
 
     if alerts.empty:
-        st.success("当前没有超过设定预警线的核心费用。")
+        st.success("当前没有超过预警线的指标。")
     else:
         for _, row in alerts.iterrows():
             st.warning(
-                f"{row['费用项目']}率为 "
-                f"{pct(row['费用率'])}，"
-                f"超过预警线 {pct(alert_threshold)}"
+                f"{row['指标名称']}："
+                f"{pct(row['费率'])}，"
+                f"高于预警线 {pct(alert_threshold)}"
             )
 
-    # 6. 多维度费用率
-    st.subheader("按部门、人员、站点分析费用率")
+    # 多维度分析
+    st.subheader("多维度核心费率分析")
 
     dimension = st.selectbox(
         "选择分析维度",
@@ -698,29 +844,29 @@ with tabs[1]:
         key="core_dimension"
     )
 
-    group_core = aggregate_rates(
+    grouped = aggregate_data(
         filtered,
         [dimension]
     )
 
     selected_rate = st.selectbox(
-        "选择费用率指标",
-        rate_cols + ["六项综合费用率"],
-        key="selected_core_rate"
+        "选择费率指标",
+        RATE_COLUMNS,
+        key="core_rate_selector"
     )
 
-    group_core = group_core.sort_values(
+    grouped = grouped.sort_values(
         selected_rate,
         ascending=False
     )
 
     fig = px.bar(
-        group_core,
+        grouped,
         x=dimension,
         y=selected_rate,
         color=selected_rate,
         text=selected_rate,
-        title=f"{dimension} - {selected_rate}排名"
+        title=f"{dimension} - {selected_rate}"
     )
 
     fig.update_traces(
@@ -728,115 +874,39 @@ with tabs[1]:
         textposition="outside"
     )
 
-    fig.update_layout(yaxis_tickformat=".1%")
+    fig.update_layout(
+        yaxis_tickformat=".1%"
+    )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
     show_table(
-        group_core[
+        grouped[
             [dimension, "分析收入"]
-            + rate_cols
-            + ["六项综合费用率"]
+            + RATE_COLUMNS
         ],
-        percent_cols=rate_cols + ["六项综合费用率"],
+        percent_cols=RATE_COLUMNS,
         money_cols=["分析收入"]
     )
 
 
-# ==================================================
-# TAB 3 全部成本结构
-# ==================================================
+# =====================================================
+# TAB 3 月度趋势
+# =====================================================
 
 with tabs[2]:
 
-    st.header("全部成本费用结构")
-
-    all_cost_items = ["成本净额"] + ALL_EXPENSES
-
-    cost_df = pd.DataFrame({
-        "费用项目": all_cost_items,
-        "金额": [
-            filtered[c].sum()
-            for c in all_cost_items
-        ]
-    })
-
-    cost_df["占收入比例"] = cost_df["金额"].apply(
-        lambda x: safe_divide(x, revenue)
-    )
-
-    total_spending = cost_df["金额"].sum()
-
-    cost_df["占总支出比例"] = cost_df["金额"].apply(
-        lambda x: safe_divide(x, total_spending)
-    )
-
-    cost_df = cost_df.sort_values(
-        "金额",
-        ascending=False
-    )
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        fig = px.bar(
-            cost_df,
-            x="金额",
-            y="费用项目",
-            orientation="h",
-            color="费用项目",
-            title="成本费用金额排名"
-        )
-
-        fig.update_layout(
-            showlegend=False,
-            yaxis={"categoryorder": "total ascending"}
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with c2:
-        positive_costs = cost_df[
-            cost_df["金额"] > 0
-        ]
-
-        if not positive_costs.empty:
-            fig = px.pie(
-                positive_costs,
-                names="费用项目",
-                values="金额",
-                hole=0.5,
-                title="总成本费用构成"
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("成本费用明细")
-
-    show_table(
-        cost_df,
-        percent_cols=[
-            "占收入比例",
-            "占总支出比例"
-        ],
-        money_cols=["金额"]
-    )
-
-
-# ==================================================
-# TAB 4 月度趋势
-# ==================================================
-
-with tabs[3]:
-
     st.header("月度经营趋势")
 
-    monthly = aggregate_rates(
+    monthly = aggregate_data(
         filtered,
         ["月份"]
     ).sort_values("月份")
 
-    st.subheader("月度收入、成本与利润")
+    st.subheader("收入、成本、费用及利润")
 
     fig = px.bar(
         monthly,
@@ -850,9 +920,12 @@ with tabs[3]:
         barmode="group"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("月度成本率、费用率、毛利率")
+    st.subheader("成本率、费用率、毛利率")
 
     fig = px.line(
         monthly,
@@ -861,22 +934,26 @@ with tabs[3]:
         markers=True
     )
 
-    fig.update_layout(yaxis_tickformat=".1%")
+    fig.update_layout(
+        yaxis_tickformat=".1%"
+    )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
     st.subheader("毛利率环比变化")
 
-    monthly["毛利率环比变化"] = (
+    monthly["毛利率环比"] = (
         monthly["毛利率"].diff()
     )
 
     fig = px.bar(
         monthly,
         x="月份",
-        y="毛利率环比变化",
-        text="毛利率环比变化",
-        title="毛利率环比变化（百分点）"
+        y="毛利率环比",
+        text="毛利率环比"
     )
 
     fig.update_traces(
@@ -884,14 +961,23 @@ with tabs[3]:
         textposition="outside"
     )
 
-    fig.update_layout(yaxis_tickformat=".1%")
+    fig.update_layout(
+        yaxis_tickformat=".1%"
+    )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+    st.subheader("月度经营数据")
 
     show_table(
         monthly[
             [
                 "月份",
+                "销售收入",
+                "退款金额",
                 "分析收入",
                 "成本净额",
                 "分析费用",
@@ -899,16 +985,18 @@ with tabs[3]:
                 "成本率",
                 "费用率",
                 "毛利率",
-                "毛利率环比变化"
+                "退款费率"
             ]
         ],
         percent_cols=[
             "成本率",
             "费用率",
             "毛利率",
-            "毛利率环比变化"
+            "退款费率"
         ],
         money_cols=[
+            "销售收入",
+            "退款金额",
             "分析收入",
             "成本净额",
             "分析费用",
@@ -916,88 +1004,196 @@ with tabs[3]:
         ]
     )
 
-    st.subheader("月度费用率变化归因")
+    # 毛利率归因
+    st.subheader("月度毛利率变化归因")
 
-    monthly_change = monthly.copy()
+    if len(monthly) < 2:
+        st.info("至少需要两个月的数据。")
+    else:
 
-    change_columns = [
-        "成本净额"
-    ] + ALL_EXPENSES
-
-    for item in change_columns:
-        monthly_change[item + "费率变化"] = (
-            monthly_change[item + "率"].diff()
-            if item != "成本净额"
-            else monthly_change["成本率"].diff()
+        selected_month = st.selectbox(
+            "选择分析月份",
+            monthly["月份"].iloc[1:].tolist()
         )
 
-    selected_month = st.selectbox(
-        "选择分析月份",
-        monthly_change["月份"].tolist(),
-        index=len(monthly_change) - 1
-    )
+        pos = monthly.index[
+            monthly["月份"] == selected_month
+        ][0]
 
-    selected_index = monthly_change.index[
-        monthly_change["月份"] == selected_month
-    ][0]
+        current = monthly.loc[pos]
 
-    pos = monthly_change.index.get_loc(selected_index)
+        previous_pos = monthly.index.get_loc(pos) - 1
 
-    if pos == 0:
-        st.info("第一个月份没有上月数据，无法计算环比归因。")
-    else:
-        row = monthly_change.loc[selected_index]
+        previous = monthly.iloc[previous_pos]
 
         attribution = []
 
-        for item in change_columns:
-            change = row[item + "费率变化"]
+        for item in ["成本净额"] + EXPENSES:
+
+            old_rate = safe_divide(
+                previous[item],
+                previous["分析收入"]
+            )
+
+            new_rate = safe_divide(
+                current[item],
+                current["分析收入"]
+            )
+
+            impact = old_rate - new_rate
 
             attribution.append({
-                "成本费用项目": item,
-                "费率变化（百分点）": change * 100,
-                "对毛利率影响（百分点）": -change * 100
+                "项目": item,
+                "上月费率": old_rate,
+                "本月费率": new_rate,
+                "毛利率影响(百分点)": impact * 100
             })
 
-        attribution_df = pd.DataFrame(attribution)
-
-        attribution_df = attribution_df.sort_values(
-            "对毛利率影响（百分点）"
+        attribution_df = pd.DataFrame(
+            attribution
         )
 
-        st.caption(
-            "基于各项成本费用占收入比例的环比变化，"
-            "正值代表改善毛利率，负值代表拖累毛利率。"
+        attribution_df = attribution_df.sort_values(
+            "毛利率影响(百分点)"
         )
 
         fig = px.bar(
             attribution_df,
-            x="成本费用项目",
-            y="对毛利率影响（百分点）",
-            color="对毛利率影响（百分点）",
-            title="各项费用对毛利率变化的影响"
+            x="项目",
+            y="毛利率影响(百分点)",
+            color="毛利率影响(百分点)",
+            title="各项成本费用对毛利率变化的影响"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
-        show_table(attribution_df)
+        show_table(
+            attribution_df,
+            percent_cols=[
+                "上月费率",
+                "本月费率"
+            ]
+        )
+
+        st.caption(
+            "归因基于列出的成本费用项目。"
+            "若使用原表费用合计且与明细不一致，"
+            "可能存在未解释的差额。"
+        )
 
 
-# ==================================================
+# =====================================================
+# TAB 4 成本费用结构
+# =====================================================
+
+with tabs[3]:
+
+    st.header("全部成本费用结构")
+
+    items = ["成本净额"] + EXPENSES
+
+    cost_df = pd.DataFrame({
+        "项目": items,
+        "金额": [
+            filtered[c].sum()
+            for c in items
+        ]
+    })
+
+    cost_df["占收入比例"] = (
+        cost_df["金额"].apply(
+            lambda x: safe_divide(x, revenue)
+        )
+    )
+
+    total_cost = cost_df["金额"].sum()
+
+    cost_df["占总支出比例"] = (
+        cost_df["金额"].apply(
+            lambda x: safe_divide(x, total_cost)
+        )
+    )
+
+    cost_df = cost_df.sort_values(
+        "金额",
+        ascending=False
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        fig = px.bar(
+            cost_df,
+            x="金额",
+            y="项目",
+            orientation="h",
+            color="项目",
+            title="成本费用金额排名"
+        )
+
+        fig.update_layout(
+            showlegend=False,
+            yaxis={
+                "categoryorder": "total ascending"
+            }
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    with c2:
+
+        positive = cost_df[
+            cost_df["金额"] > 0
+        ]
+
+        if not positive.empty:
+
+            fig = px.pie(
+                positive,
+                names="项目",
+                values="金额",
+                hole=0.5,
+                title="成本费用构成"
+            )
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True
+            )
+
+    st.subheader("成本费用占比明细")
+
+    show_table(
+        cost_df,
+        percent_cols=[
+            "占收入比例",
+            "占总支出比例"
+        ],
+        money_cols=["金额"]
+    )
+
+
+# =====================================================
 # TAB 5 运营绩效
-# ==================================================
+# =====================================================
 
 with tabs[4]:
 
     st.header("运营绩效分析")
 
     dimension = st.selectbox(
-        "选择排名维度",
+        "选择绩效分析维度",
         ["部门", "运营人员", "站点"],
         key="performance_dimension"
     )
 
-    performance = aggregate_rates(
+    performance = aggregate_data(
         filtered,
         [dimension]
     )
@@ -1007,27 +1203,31 @@ with tabs[4]:
         ascending=False
     )
 
+    st.subheader("经营绩效排名")
+
     show_table(
         performance[
             [
                 dimension,
+                "销售收入",
+                "退款金额",
                 "分析收入",
                 "成本净额",
                 "分析费用",
                 "分析毛利",
-                "成本率",
-                "费用率",
                 "毛利率",
-                "六项综合费用率"
+                "退款费率",
+                "七项核心费用率"
             ]
         ],
         percent_cols=[
-            "成本率",
-            "费用率",
             "毛利率",
-            "六项综合费用率"
+            "退款费率",
+            "七项核心费用率"
         ],
         money_cols=[
+            "销售收入",
+            "退款金额",
             "分析收入",
             "成本净额",
             "分析费用",
@@ -1050,151 +1250,191 @@ with tabs[4]:
         textposition="outside"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("毛利率与费用率对比")
+    st.subheader("运营人员 / 站点费率对比")
 
-    fig = px.scatter(
-        performance,
-        x="费用率",
-        y="毛利率",
-        size="分析收入",
-        hover_name=dimension,
-        title="费用率与毛利率关系",
-        size_max=55
+    selected_rate = st.selectbox(
+        "选择对比费率",
+        RATE_COLUMNS,
+        key="performance_rate"
+    )
+
+    fig = px.bar(
+        performance.sort_values(
+            selected_rate,
+            ascending=False
+        ),
+        x=dimension,
+        y=selected_rate,
+        color=selected_rate,
+        text=selected_rate
+    )
+
+    fig.update_traces(
+        texttemplate="%{y:.2%}",
+        textposition="outside"
     )
 
     fig.update_layout(
-        xaxis_tickformat=".1%",
         yaxis_tickformat=".1%"
     )
 
-    # 收入为负数时不适合气泡大小
-    if (performance["分析收入"] < 0).any():
-        st.info("存在负收入分组，跳过气泡图。")
-    else:
-        st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
 
-# ==================================================
+# =====================================================
 # TAB 6 利润优化
-# ==================================================
+# =====================================================
 
 with tabs[5]:
 
     st.header("利润优化与降本模拟")
 
     target_profit = revenue * target_margin
-
     profit_gap = target_profit - profit
 
     c1, c2, c3 = st.columns(3)
 
-    c1.metric("当前毛利率", pct(margin))
-    c2.metric("目标毛利率", pct(target_margin))
+    c1.metric(
+        "当前毛利率",
+        pct(margin)
+    )
+
+    c2.metric(
+        "目标毛利率",
+        pct(target_margin)
+    )
+
     c3.metric(
-        "达到目标所需增加利润",
+        "目标利润缺口",
         money(max(profit_gap, 0))
     )
 
     st.divider()
 
-    st.subheader("单项费用降本模拟")
+    st.subheader("单项费用优化模拟")
 
     selected_expense = st.selectbox(
         "选择优化项目",
-        ["成本净额"] + ALL_EXPENSES
+        ["成本净额"] + EXPENSES
     )
 
     saving_rate = st.slider(
         "预计降低费用比例 (%)",
-        0, 50, 10, 1
+        0,
+        50,
+        10,
+        1
     ) / 100
 
-    original_amount = filtered[selected_expense].sum()
+    original = filtered[selected_expense].sum()
 
-    saved_amount = original_amount * saving_rate
+    saving = original * saving_rate
 
-    new_profit = profit + saved_amount
+    new_profit = profit + saving
 
-    new_margin = safe_divide(new_profit, revenue)
+    new_margin = safe_divide(
+        new_profit,
+        revenue
+    )
 
     c1, c2, c3 = st.columns(3)
 
-    c1.metric("预计节省金额", money(saved_amount))
-    c2.metric("优化后毛利", money(new_profit))
+    c1.metric(
+        "预计节省金额",
+        money(saving)
+    )
+
+    c2.metric(
+        "优化后净毛利",
+        money(new_profit)
+    )
+
     c3.metric(
         "优化后毛利率",
         pct(new_margin),
         delta=(
             f"{(new_margin-margin)*100:.2f} 个百分点"
-            if pd.notna(new_margin) and pd.notna(margin)
+            if pd.notna(new_margin)
+            and pd.notna(margin)
             else None
         )
     )
 
     st.divider()
 
-    st.subheader("六项费用降本潜力")
+    st.subheader("退款率改善模拟")
 
-    simulation = pd.DataFrame({
-        "费用项目": CORE_EXPENSES,
-        "当前金额": [
-            filtered[c].sum()
-            for c in CORE_EXPENSES
-        ]
-    })
+    refund_reduction = st.slider(
+        "退款金额降低比例 (%)",
+        0,
+        50,
+        10,
+        1
+    ) / 100
 
-    simulation["节省10%金额"] = (
-        simulation["当前金额"] * 0.1
+    refund_saving = refund * refund_reduction
+
+    refund_new_profit = profit + refund_saving
+
+    refund_new_revenue = revenue + refund_saving
+
+    refund_new_margin = safe_divide(
+        refund_new_profit,
+        refund_new_revenue
     )
 
-    simulation["毛利率提升（百分点）"] = (
-        simulation["节省10%金额"]
-        / revenue * 100
-        if revenue != 0
-        else np.nan
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "减少退款金额",
+        money(refund_saving)
     )
 
-    simulation = simulation.sort_values(
-        "节省10%金额",
-        ascending=False
+    c2.metric(
+        "改善后利润",
+        money(refund_new_profit)
     )
 
-    show_table(
-        simulation,
-        money_cols=[
-            "当前金额",
-            "节省10%金额"
-        ]
+    c3.metric(
+        "改善后毛利率",
+        pct(refund_new_margin)
     )
 
     st.caption(
-        "模拟假设收入不变、其他费用不变。"
-        "实际降本可能影响销量、服务质量和履约表现。"
+        "退款模拟假设销售收入、成本及其他费用不变，"
+        "仅减少退款金额；实际经营可能存在"
+        "退货回收、库存及售后费用联动。"
     )
 
 
-# ==================================================
+# =====================================================
 # TAB 7 数据核对与导出
-# ==================================================
+# =====================================================
 
 with tabs[6]:
 
-    st.header("数据核对与导出")
+    st.header("数据核对与 Excel 导出")
 
     st.subheader("财务数据核对")
 
     checks = []
 
-    check_map = [
+    for original, calculated in [
         ("收入合计", "计算收入"),
         ("费用合计", "计算费用")
-    ]
+    ]:
 
-    for original, calculated in check_map:
         if original in filtered.columns:
-            difference = (
+
+            diff = (
                 filtered[original]
                 - filtered[calculated]
             ).abs()
@@ -1202,13 +1442,14 @@ with tabs[6]:
             checks.append({
                 "核对项目": original,
                 "差异行数": int(
-                    (difference > 0.01).sum()
+                    (diff > 0.01).sum()
                 ),
-                "差异绝对值合计": difference.sum()
+                "差异绝对值合计": diff.sum()
             })
 
     if "销售净毛利" in filtered.columns:
-        difference = (
+
+        diff = (
             filtered["销售净毛利"]
             - filtered["分析毛利"]
         ).abs()
@@ -1216,68 +1457,67 @@ with tabs[6]:
         checks.append({
             "核对项目": "销售净毛利",
             "差异行数": int(
-                (difference > 0.01).sum()
+                (diff > 0.01).sum()
             ),
-            "差异绝对值合计": difference.sum()
+            "差异绝对值合计": diff.sum()
         })
 
     check_df = pd.DataFrame(checks)
 
-    show_table(
-        check_df,
-        money_cols=["差异绝对值合计"]
-    )
+    if not check_df.empty:
+        show_table(
+            check_df,
+            money_cols=["差异绝对值合计"]
+        )
 
-    st.info(
-        "若原表费用合计与自动计算费用合计存在差异，"
-        "请核实头程净额是否已包含在成本净额中，"
-        "以及是否存在未列出的费用。"
-    )
+    if refund_sign_errors > 0:
+        st.warning(
+            f"原始数据有 {refund_sign_errors} 行退款符号"
+            "与所选记录方式不一致，请检查。"
+        )
 
     st.subheader("平台回款")
 
     c1, c2 = st.columns(2)
 
     if "平台回款" in filtered.columns:
+
         c1.metric(
             "平台回款",
             money(filtered["平台回款"].sum())
         )
 
     if "实际回款-提成计算" in filtered.columns:
+
         c2.metric(
             "实际回款-提成计算",
-            money(filtered["实际回款-提成计算"].sum())
+            money(
+                filtered["实际回款-提成计算"].sum()
+            )
         )
 
-    st.subheader("下载分析报表")
+    st.divider()
 
-    export_monthly = aggregate_rates(
-        filtered, ["月份"]
+    st.subheader("导出分析结果")
+
+    export_monthly = aggregate_data(
+        filtered,
+        ["月份"]
     ).sort_values("月份")
 
-    export_department = aggregate_rates(
-        filtered, ["部门"]
+    export_department = aggregate_data(
+        filtered,
+        ["部门"]
     )
 
-    export_staff = aggregate_rates(
-        filtered, ["运营人员"]
+    export_staff = aggregate_data(
+        filtered,
+        ["运营人员"]
     )
 
-    export_site = aggregate_rates(
-        filtered, ["站点"]
-    )
-
-    export_core = pd.DataFrame({
-        "费用项目": CORE_EXPENSES,
-        "费用金额": [
-            filtered[c].sum()
-            for c in CORE_EXPENSES
-        ]
-    })
-
-    export_core["费用率"] = export_core["费用金额"].apply(
-        lambda x: safe_divide(x, revenue)
+    export_site = aggregate_data(
+        filtered,
+        ["站点"]
     )
 
     output = io.BytesIO()
@@ -1291,6 +1531,12 @@ with tabs[6]:
             writer,
             index=False,
             sheet_name="经营明细"
+        )
+
+        core_df.to_excel(
+            writer,
+            index=False,
+            sheet_name="八项核心费率"
         )
 
         export_monthly.to_excel(
@@ -1317,22 +1563,16 @@ with tabs[6]:
             sheet_name="站点分析"
         )
 
-        export_core.to_excel(
-            writer,
-            index=False,
-            sheet_name="六项核心费用率"
-        )
-
         check_df.to_excel(
             writer,
             index=False,
-            sheet_name="数据核对"
+            sheet_name="财务核对"
         )
 
     st.download_button(
-        "下载完整经营分析 Excel",
+        label="下载完整经营分析 Excel",
         data=output.getvalue(),
-        file_name="经营利润与费用分析.xlsx",
+        file_name="经营利润与核心费用率分析.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
@@ -1347,14 +1587,9 @@ with tabs[6]:
         hide_index=True
     )
 
-
-# ==================================================
-# 页脚
-# ==================================================
-
 st.divider()
 
 st.caption(
     "经营利润与成本费用分析系统 | "
-    "数据来源：上传的财务经营报表"
+    "数据来源：上传的经营财务报表"
 )
